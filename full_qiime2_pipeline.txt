@@ -1,0 +1,422 @@
+# QIIME2 PIPELINE
+# FOR USDA AMITRAZ | IMMATURE DRONES ONLY
+
+# Authors:       Layla Jeries (current pipeline with updated notes and analysis-specific notes parameters)
+#                Patrick Gallagher (original pipeline with notes) 
+# Date created:  2026-06-25
+# Last modified: 2026-11-06
+
+#### NECESSARY FILES (NEED TO BE ACCESSIBLE/IN WORKING DIRECTORY)
+  # fastq files
+  # mapping.txt
+  # mapping_guts.txt & mapping_repros.txt (for independent analyses)
+  # classifier = 2024.09.backbone.v4.nb.sklearn-1.4.2.qza
+
+################################################################################
+
+conda activate qiime2-2024.10
+
+################################################################################
+
+#### IMPORT SEQUENCING DATA INTO QIIME2
+
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path path/to/allfastqs \
+  --input-format CasavaOneEightSingleLanePerSampleDirFmt \
+  --output-path demux-paired-end.qza
+
+#### SUMMARIZE SEQUENCING DATA AND QUALITY ####
+  
+qiime demux summarize \
+  --i-data demux-paired-end.qza \
+  --o-visualization demux-paired-end.qzv
+  
+qiime tools view demux-paired-end.qzv
+
+################################################################################
+
+#### JOIN PAIRED ENDS AND DENOISE SEQUENCING DATA
+  # trim and trunc numbers depend on sequencing data quality
+  # selected based on the output of demux-paried-end.qzv
+
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs demux-paired-end.qza \
+  --o-table table-dada2.qza \
+  --o-representative-sequences rep-seqs \
+  --o-denoising-stats stats \
+  --p-trim-left-f 38 \
+  --p-trim-left-r 38 \
+  --p-trunc-len-f 250 \
+  --p-trunc-len-r 200
+
+################################################################################
+
+#### ASSIGN THE SEQUENCING READS TO SAMPLES BASED ON MAPPING FILE
+
+qiime feature-table filter-samples \
+  --i-table table-dada2.qza \
+  --m-metadata-file mapping.txt \
+  --o-filtered-table filtered_table.qza
+
+################################################################################
+
+#### SUMMARIZE DATA
+# The feature-table summarize command will give information on how many sequences are associated with each sample and with each feature, histograms of those distributions, and some related summary statistics.
+
+qiime feature-table summarize \
+  --i-table filtered_table.qza \
+  --o-visualization filtered_table.qzv \
+  --m-sample-metadata-file mapping.txt
+    
+qiime tools view filtered_table.qzv
+
+################################################################################
+
+#### ASSIGN TAXONOMY TO REPRESENTATIVE SEQUENCES
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier 2024.09.backbone.v4.nb.sklearn-1.4.2.qza \
+  --i-reads rep-seqs.qza \
+  --o-classification taxonomy.qza
+
+#### SUMMARIZE METADATA WITH TAXONOMY
+
+qiime metadata tabulate \
+  --m-input-file taxonomy.qza \
+  --o-visualization taxonomy.qzv
+
+qiime tools view taxonomy.qzv
+
+#### BUILD PHYLOGENY OF REPRESENTATIVE SEQUENCES
+
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences rep-seqs.qza \
+  --o-alignment aligned-rep-seqs.qza \
+  --o-masked-alignment masked-aligned-rep-seqs.qza \
+  --o-tree unrooted-tree.qza \
+  --o-rooted-tree rooted-tree.qza
+
+################################################################################
+
+#### FILTER SEQUENCES   
+
+# Filter out all sequences assigned as Mitochondria, Chloroplast, or Unassigned
+qiime taxa filter-table \
+  --i-table filtered_table.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-exclude Mitochondria,Unassigned,Chloroplast \
+  --o-filtered-table feature_table_1.qza
+
+# Filter out all sequences assigned only to domain Bacteria
+qiime taxa filter-table \
+  --i-table feature_table_1.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-mode exact \
+  --p-exclude "d__Bacteria" \
+  --o-filtered-table feature_table_2.qza
+
+# Filter out all sequences assigned only to domain Archaea
+qiime taxa filter-table \
+  --i-table feature_table_2.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-mode exact \
+  --p-exclude "d__Archaea" \
+  --o-filtered-table feature_table_3.qza
+
+# Filter out all sequences assigned only to domain Eukaryota
+qiime taxa filter-table \
+  --i-table feature_table_3.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-mode exact \
+  --p-exclude "d__Eukaryota" \
+  --o-filtered-table feature_table_4.qza
+
+#### ADDITIONAL FILTERING
+
+# Filter out Archaea taxon that slipped through initial filter
+qiime taxa filter-table \
+  --i-table feature_table_4.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-mode contains \
+  --p-exclude Archaea \
+  --o-filtered-table feature_table_5.qza
+
+# Filter out known human microbiome contaminants evident in taxonomy file
+qiime taxa filter-table \
+  --i-table feature_table_5.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-mode contains \
+  --p-exclude Staphylococcus,Streptococcus,Escherichia,Dermobacter,Cutibacterium,Corynebacterium,Veillonella,Actinomyces,Oribacterium \
+  --o-filtered-table feature_table_6.qza
+
+# Summarize filtered feature table
+qiime feature-table summarize \
+  --i-table feature_table_6.qza \
+  --o-visualization feature_table_6.qzv \
+  --m-sample-metadata-file mapping.txt
+
+# Visualize
+  # NOTE the mean frequency of reads and multiply that by 0.001. This number is necessary for the next command.
+qiime tools view feature_table_6.qzv
+
+#### FILTER OUT LOW FREQUENCY READS (<1% frequency)
+  # Set p-min-frequency value to mean frequency * 0.001
+  # FOR THIS DATASET:
+    # Mean frequency = 22,392.5   
+    # 22,392.5 * 0.001 = 22.40 = 22
+
+qiime feature-table filter-features \
+--i-table feature_table_6.qza \
+--p-min-frequency 22 \
+--o-filtered-table feature_table_7.qza
+
+# Filtering to keep honey bee associated taxa only
+qiime feature-table filter-features \
+  --i-table feature_table_7.qza \
+  --m-metadata-file asvs_to_keep_v2.txt \
+  --o-filtered-table feature_table_8.qza 
+
+# Summarize filtered feature table 
+qiime feature-table summarize \
+  --i-table feature_table_8.qza \
+  --o-visualization feature_table_8.qzv \
+  --m-sample-metadata-file mapping.txt
+
+###############################################################
+
+#### RAREIFY DATA 
+
+# Visualize feature table
+qiime tools view feature_table_8.qzv
+
+# VALUES FOR THIS DATASET:
+  # LOWEST = ADR114G -> 3 reads
+  # HIGHEST = CDR90G -> 90072 reads
+  
+# Rarefiy
+  # Using 1000 reads because:
+    # a) It retains more samples and more paired samples than 5000
+    # b) It retains more samples and more paired samples than 3000
+    # c) 1003 is the lowest read count for a retained sample, which is ~1 order of magnitude higher than the highest count negative control sample
+
+qiime diversity alpha-rarefaction \
+  --i-table feature_table_8.qza \
+  --i-phylogeny rooted-tree.qza \
+  --p-max-depth 90072 \
+  --m-metadata-file mapping.txt \
+  --p-min-depth 1000 \
+  --o-visualization alpha-rarefaction.qzv 
+
+# Visualize
+qiime tools view alpha-rarefaction.qzv 
+
+################################################################################
+
+#### FILTER BY SAMPLE TYPES (GUT VS. REPRO)
+
+qiime feature-table filter-samples \
+  --i-table feature_table_8.qza \
+  --m-metadata-file mapping.txt \
+  --p-where "Sample_Type = 'Gut'" \
+  --o-filtered-table feature_table_8_GUT.qza
+
+qiime feature-table filter-samples \
+  --i-table feature_table_8.qza \
+  --m-metadata-file mapping.txt \
+  --p-where "Sample_Type = 'Repro'" \
+  --o-filtered-table feature_table_8_REPRO.qza
+
+################################################################################
+
+#### RUN CORE ALPHA AND BETA DIVERSITY ANALYSES
+  # Change sampling depth to desired number
+  # 1000; chose this from my upstream rarefaction step
+
+  # Performed for both guts and repros SEPARATELY
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \
+  --i-table feature_table_8_GUT.qza \
+  --p-sampling-depth 1000 \
+  --m-metadata-file mapping.txt \
+  --output-dir core_diversity_guts
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \
+  --i-table feature_table_8_REPRO.qza \
+  --p-sampling-depth 1000 \
+  --m-metadata-file mapping.txt \
+  --output-dir core_diversity_repros
+
+################################################################################
+
+#### VISUALIZE ALPHA DIVERSITY GRAPHS AND GENERATE STATS
+  # Detailed here is the general pipeline that was adapted for automated high-throughput processing via "q2_pipeline_alphas.sh" script.
+  # Please see that script for more information.
+
+# Observed features = number of amplicon sequence variants (ASVs) 
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core_diversity/observed_features_vector.qza \
+  --m-metadata-file mapping.txt \
+  --o-visualization core_diversity/observed_features_vector.qzv
+  
+qiime tools view core_diversity/observed_features_vector.qzv
+
+# Faith's PD = measure of phylogenetic diversity ("PD"); minimum total length of all branches required to span a given set of taxa on the tree
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core_diversity/faith_pd_vector.qza \
+  --m-metadata-file mapping.txt \
+  --o-visualization core_diversity/faith_pd-group-significance.qzv
+
+qiime tools view core_diversity/faith_pd-group-significance.qzv
+
+# Evenness = (Pielou's) measure of evenness (relative abundance of each species)
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core_diversity/evenness_vector.qza \
+  --m-metadata-file mapping.txt \
+  --o-visualization core_diversity/evenness-group-significance.qzv
+
+qiime tools view core_diversity/evenness-group-significance.qzv
+
+# Shannon = measures species richness (number of species) and evenness (relative abundance of each species)
+qiime diversity alpha \
+  --i-table feature_table.qza \
+  --p-metric shannon \
+  --o-alpha-diversity core_diversity/shannon_vector.qza
+  
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core_diversity/shannon_vector.qza \
+  --m-metadata-file mapping.txt \
+  --o-visualization core_diversity/shannon-group-significance.qzv
+
+################################################################################
+
+#### PERFORM STATS ON BETA DIVERSITY RESULTS (PERMANOVA)
+  # Detailed here is the general pipeline that was adapted for automated high-throughput processing via "q2_pipeline_permanova.sh" script.
+  # Please see that script for more information.
+
+# Visualize beta diversity PCOA graphs 
+qiime tools view core_diversity/bray_curtis_emperor.qzv
+qiime tools view core_diversity/unweighted_unifrac_emperor.qzv
+qiime tools view core_diversity/weighted_unifrac_emperor.qzv
+
+# Weighted Unifrac 
+qiime diversity beta-group-significance \
+  --i-distance-matrix core_diversity/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file mapping.txt \
+  --m-metadata-column COLUMN \
+  --o-visualization core_diversity/PERMANOVAs/weighted/weighted_distance_matrix_COLUMN.qzv \
+  --p-pairwise
+  
+qiime tools view core_diversity/weighted_distance_COLUMN_matrix.qzv
+
+# Unweighted Unifrac
+qiime diversity beta-group-significance \
+  --i-distance-matrix core_diversity/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file mapping.txt \
+  --m-metadata-column COLUMN \
+  --o-visualization core_diversity/PERMANOVAs/unweighted/unweighted_distance_matrix_COLUMN.qzv \
+  --p-pairwise
+  
+qiime tools view core_diversity/unweighted_distance_matrix_COLUMN.qzv
+
+# Bray-Curtis
+qiime diversity beta-group-significance \
+  --i-distance-matrix core_diversity/bray_curtis_distance_matrix.qza \
+  --m-metadata-file mapping.txt \
+  --m-metadata-column COLUMN \
+  --o-visualization core_diversity/PERMANOVAs/braycurtis/bray_curtis_distance_matrix_COLUMN.qzv \
+  --p-pairwise
+  
+qiime tools view core_diversity/bray_curtis_distance_matrix_COLUMN.qzv
+
+################################################################################
+
+#### TAXONOMIC ABUNDANCES
+
+# Rarefy feature table
+# For GUTS
+qiime feature-table rarefy \
+  --i-table feature_table_8_GUT.qza \
+  --p-sampling-depth 1000 \
+  --o-rarefied-table feature_table_rarefied_guts.qza
+
+# For REPROS
+qiime feature-table rarefy \
+  --i-table feature_table_8_REPRO.qza \
+  --p-sampling-depth 1000 \
+  --o-rarefied-table feature_table_rarefied_repros.qza
+
+#### RELATIVE ABUNDANCE
+  # Plot taxonomy per sample as relative abundance barplot
+
+# For GUTS
+qiime taxa barplot \
+  --i-table feature_table_rarefied_guts.qza \
+  --i-taxonomy taxonomy.qza \
+  --m-metadata-file mapping.txt \
+  --o-visualization taxa_barplots_guts.qzv
+
+qiime tools view taxa_barplots_guts.qzv
+
+# For REPROS
+qiime taxa barplot \
+  --i-table feature_table_rarefied_repros.qza \
+  --i-taxonomy taxonomy.qza \
+  --m-metadata-file mapping.txt \
+  --o-visualization taxa_barplots_repros.qzv
+
+qiime tools view taxa_barplots_repros.qzv
+
+#### DIFFERENTIAL ABUNDANCE
+
+# Collapse table
+    # LVL = 1-7 | 1 = Domain, 2 = Phylum, 3 = Class, 4 = Order, 5 = Family, 6 = Genus, 7 = Species
+
+# To genus
+qiime taxa collapse \
+  --i-table feature_table_rarefied_guts.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 6 \
+  --o-collapsed-table coll-table-l6genus_guts.qza
+
+qiime taxa collapse \
+  --i-table feature_table_rarefied_repros.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 6 \
+  --o-collapsed-table coll-table-l6genus_repros.qza
+
+# To species
+qiime taxa collapse \
+  --i-table feature_table_rarefied_guts.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 7 \
+  --o-collapsed-table coll-table-l7species_guts.qza
+
+qiime taxa collapse \
+  --i-table feature_table_rarefied_repros.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 7 \
+  --o-collapsed-table coll-table-l7species_repros.qza
+
+# Run differential analysis
+    # Detailed here is the general pipeline that was modified for my automated high-throughput processing via "q2_pipeline_diffab.sh" script.
+    # Please see that script for more information.
+
+qiime composition ancombc \
+  --i-table coll-table-l6genus.qza \
+  --m-metadata-file mapping.txt \
+  --p-formula 'COLUMN' \
+  --p-reference-levels COLUMN::REFERENCEINCOLUMN \
+  --o-differentials l6genus-ancombc-COLUMN-REFERENCEINCOLUMN.qza
+
+qiime composition da-barplot \
+  --i-data l6genus-ancombc-COLUMN-REFERENCEINCOLUMN.qza \
+  --p-significance-threshold 0.05 \
+  --p-level-delimiter ';' \
+  --o-visualization l6genus-ancombc-COLUMN-REFERENCEINCOLUMN.qzv
+  
+qiime tools view l6genus-ancombc-COLUMN-REFERENCEINCOLUMN.qzv
+
+### END OF PIPELINE ###
